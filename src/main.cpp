@@ -78,6 +78,9 @@ int main(int argc, char *argv[])
 //    xianyu::Config::LoadFromYaml(root);
 //    v = c->GetValue();
 //    XIANYU_LOG_INFO(XIANYU_LOG_ROOT()) << "after: " << v.name_;
-    xianyu::TestForDefine();
+
+
+//    XIANYU_LOG_INFO(XIANYU_LOG_NAME("system")) << "hello";
+    XIANYU_LOG_INFO(XIANYU_LOG_NAME("system")) << "hello";
     return 0;
 }

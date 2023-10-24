@@ -140,7 +140,7 @@ public:
 
     void Init();
 
-    bool GetErrorFormat() const { return error_format_; }
+    bool IsErrorFormat() const { return error_format_; }
 private:
     QString pattern_;
     QVector<FormatItem::ptr> items_;
@@ -154,14 +154,28 @@ signals:
 ////////////////////////
 class LogAppender
 {
+    friend class Logger;
 public:
     using ptr = QSharedPointer<LogAppender>;
     virtual ~LogAppender(){}
 
+    bool has_formatter_{false};
+
     virtual void log(QSharedPointer<Logger> logger, LogLevel::Level level, LogEvent::ptr event) = 0;
     virtual QString ToYamlString() = 0;
 
-    void SetFormatter(LogFormatter::ptr val) {formatter_= val;}
+    void SetFormatter(LogFormatter::ptr val)
+    {
+        formatter_= val;
+        if(formatter_.get()!=nullptr)
+        {
+            has_formatter_ = true;
+        }
+        else
+        {
+            has_formatter_ = false;
+        }
+    }
     LogFormatter::ptr GetFomatter()const {return formatter_;}
     LogLevel::Level GetLevel()const {return level_;}
     void SetLevel(LogLevel::Level level){level_ = level;}//设置不同级别的目的：存储不同级别的对象，比如只存ERROR级别以上的对象，只存DEBUG级别以上的对象
@@ -193,7 +207,7 @@ public:
 
     void AddAppender(LogAppender::ptr appender);
     void DelAppender(LogAppender::ptr appender);
-    void ClearAppender();
+    void ClearAppenders();
     LogLevel::Level GetLevel()const {return level_;}
     void SetLevel(LogLevel::Level val) {level_ = val;}
     void SetFormatter(LogFormatter::ptr val);

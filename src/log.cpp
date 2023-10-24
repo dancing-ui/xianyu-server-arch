@@ -316,25 +316,32 @@ void Logger::DelAppender(LogAppender::ptr appender)
     }
 }
 
-void Logger::ClearAppender()
+void Logger::ClearAppenders()
 {
     appenders_.clear();
 }
 
 void Logger::SetFormatter(LogFormatter::ptr val)
 {
-    formatter_ == val;
+    formatter_ = val;
+    for(auto& i:appenders_)
+    {
+        if(!i->has_formatter_) // 只要从yml中读取了配置，后续就不能修改日志格式
+        {
+            i->formatter_ = formatter_;
+        }
+    }
 }
 
 void Logger::SetFormatter(const QString &val)
 {
     xianyu::LogFormatter::ptr new_val(new xianyu::LogFormatter(val));
-    if(new_val->GetErrorFormat())
+    if(new_val->IsErrorFormat())
     {
         std::cout<< "Logger setFormatter name=" << name_.toStdString() << " value=" << val.toStdString() << "invalid formatter" << std::endl;
         return;
     }
-    formatter_ = new_val;
+    SetFormatter(new_val);
 }
 
 LogFormatter::ptr Logger::GetFormatter() const
@@ -348,7 +355,7 @@ QString Logger::ToYamlString()
     node["name"] = name_.toStdString();
     if(level_ != LogLevel::UNKNOWN)
         node["level"] = LogLevel::ToString(level_).toStdString();
-    if(formatter_->GetPattern().isEmpty())
+    if(formatter_.get() != nullptr)
         node["formatter"] = formatter_->GetPattern().toStdString();
     for(auto& i:appenders_)
     {
@@ -373,7 +380,7 @@ QString StdoutLogAppender::ToYamlString()
     node["type"] = "StdoutLogAppender";
     if(level_ != LogLevel::UNKNOWN)
         node["level"] = LogLevel::ToString(level_).toStdString();
-    if(!formatter_->GetPattern().isEmpty())
+    if(formatter_.get()!=nullptr && has_formatter_)
         node["formatter"] = formatter_->GetPattern().toStdString();
     std::stringstream ss;
     ss << node;
@@ -408,7 +415,7 @@ QString FileLogAppender::ToYamlString()
     node["filename"] = file_name_.toStdString();
     if(level_ != LogLevel::UNKNOWN)
         node["level"] = LogLevel::ToString(level_).toStdString();
-    if(!formatter_->GetPattern().isEmpty())
+    if(formatter_.get()!=nullptr && has_formatter_)
         node["formatter"] = formatter_->GetPattern().toStdString();
     std::stringstream ss;
     ss << node;
@@ -611,14 +618,7 @@ public:
 };
 
 xianyu::ConfigVar<QSet<xianyu::LogDefine>>::ptr g_log_defines = xianyu::Config::Lookup("logs", QSet<xianyu::LogDefine>(), "log config");
-void TestForDefine()
-{
-    auto t = xianyu::LoggerMgr::GetInstance();
-    std::cout<< xianyu::LoggerMgr::GetInstance()->ToYamlString().toStdString() << '\n';
-    YAML::Node root = YAML::LoadFile("./log.yml");//从yaml文件中重新加载
-    xianyu::Config::LoadFromYaml(root);
-    std::cout<< xianyu::LoggerMgr::GetInstance()->ToYamlString().toStdString() << '\n';
-}
+
 struct LogIniter
 {
     LogIniter()
@@ -651,7 +651,7 @@ struct LogIniter
                 {
                     logger->SetFormatter(i.formatter_);
                 }
-                logger->ClearAppender();
+                logger->ClearAppenders();
                 for(auto& a:i.appenders_)
                 {
                     xianyu::LogAppender::ptr ap;
@@ -664,6 +664,21 @@ struct LogIniter
                         ap.reset(new StdoutLogAppender);
                     }
                     ap->SetLevel(a.level_);
+                    if(!a.formatter_.isEmpty())
+                    {
+                        LogFormatter::ptr fmt(new LogFormatter(a.formatter_));
+                        if(fmt->IsErrorFormat() == false)
+                        {
+                            ap->SetFormatter(fmt);
+                        }
+                        else
+                        {
+                            std::cout << "log.name=" << i.name_.toStdString()
+                                      << " appender type=" << a.type_
+                                      << " formatter=" << a.formatter_.toStdString()
+                                      << " is invalid"<< std::endl;
+                        }
+                    }
                     logger->AddAppender(ap);
                 }
             }
@@ -676,14 +691,20 @@ struct LogIniter
                     //del
                     auto logger = XIANYU_LOG_NAME(i.name_);
                     logger->SetLevel((LogLevel::Level)100);//级别越高，越难打印
-                    logger->ClearAppender();
+                    logger->ClearAppenders();
                 }
             }
         });
+        YAML::Node root = YAML::LoadFile("./log.yml");//从yaml文件中重新加载
+        xianyu::Config::LoadFromYaml(root);
     }
 };
 
 static LogIniter __log_init;
+
+///////
+/// 通过LogMgr的单例对象去管理所有的日志器logger，静态对象LogIniter从log.yaml中读取logger配置，并根据配置去更改LogMgr中的logger
+
 
 }
 
