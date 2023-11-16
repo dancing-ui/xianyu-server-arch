@@ -41,7 +41,8 @@ LogLevel::Level LogLevel::FromString(const QString &str)
 
 LogEvent::LogEvent(QSharedPointer<Logger> logger, LogLevel::Level level
                    , const QString& file_name, qint32 line, quint32 elapse
-                   , quint32 thread_id, quint32 fiber_id, quint64 time)
+                   , quint32 thread_id, quint32 fiber_id, quint64 time
+                   , const QString& thread_name)
     : file_name_(file_name)
     , line_(line)
     , elapse_(elapse)
@@ -50,6 +51,7 @@ LogEvent::LogEvent(QSharedPointer<Logger> logger, LogLevel::Level level
     , time_(time)
     , logger_(logger)
     , level_(level)
+    , thread_name_(thread_name)
 {
     content_stream_.setString(&content_);
 }
@@ -221,7 +223,8 @@ void LogFormatter::Init()
         XX(f, FileNameFormatItem),
         XX(l, LineFormatItem),
         XX(T, TabFormatItem),
-        XX(F, FiberIdFormatItem)
+        XX(F, FiberIdFormatItem),
+        XX(N, ThreadNameFormatItem)
 #undef XX
     };
 
@@ -254,7 +257,7 @@ Logger::Logger(const QString &kName)
     : name_(kName)
     , level_(LogLevel::DEBUG)
 {
-    formatter_.reset(new LogFormatter(QString("%d{yyyy-MM-dd hh:mm:ss}%T%t%T%F%T[%p]%T[%c]%T<%f:%l>%T%m%n")));
+    formatter_.reset(new LogFormatter(QString("%d{yyyy-MM-dd hh:mm:ss}%T[%t:%N]%T%T%F%T[%p]%T[%c]%T<%f:%l>%T%m%n")));
 }
 
 void Logger::log(LogLevel::Level level, LogEvent::ptr event)
@@ -262,6 +265,7 @@ void Logger::log(LogLevel::Level level, LogEvent::ptr event)
     if(level >= level_)
     {
         auto self = sharedFromThis();
+        MutexType::CommonLock lock(mutex_);
         if(!appenders_.isEmpty())
         {
             for(auto& i:appenders_)
@@ -298,14 +302,17 @@ void Logger::Fatal(LogEvent::ptr event)
 
 void Logger::AddAppender(LogAppender::ptr appender)
 {
+    MutexType::CommonLock lock1(mutex_);
     if(appender->GetFomatter().get()==nullptr)
     {
+        MutexType::CommonLock lock2(appender->mutex_);
         appender->SetFormatter(formatter_);
     }
     appenders_.push_back(appender);
 }
 void Logger::DelAppender(LogAppender::ptr appender)
 {
+    MutexType::CommonLock lock(mutex_);
     for(auto it = appenders_.begin();it!=appenders_.end();it++)
     {
         if(*it==appender)
@@ -318,14 +325,17 @@ void Logger::DelAppender(LogAppender::ptr appender)
 
 void Logger::ClearAppenders()
 {
+    MutexType::CommonLock lock(mutex_);
     appenders_.clear();
 }
 
 void Logger::SetFormatter(LogFormatter::ptr val)
 {
+    MutexType::CommonLock lock1(mutex_);
     formatter_ = val;
     for(auto& i:appenders_)
     {
+        MutexType::CommonLock lock2(i->mutex_);
         if(!i->has_formatter_) // 只要从yml中读取了配置，后续就不能修改日志格式
         {
             i->formatter_ = formatter_;
@@ -344,13 +354,15 @@ void Logger::SetFormatter(const QString &val)
     SetFormatter(new_val);
 }
 
-LogFormatter::ptr Logger::GetFormatter() const
+LogFormatter::ptr Logger::GetFormatter()
 {
+    MutexType::CommonLock lock(mutex_);
     return formatter_;
 }
 
 QString Logger::ToYamlString()
 {
+    MutexType::CommonLock lock(mutex_);
     YAML::Node node;
     node["name"] = name_.toStdString();
     if(level_ != LogLevel::UNKNOWN)
@@ -370,12 +382,14 @@ void StdoutLogAppender::log(QSharedPointer<Logger> logger, LogLevel::Level level
 {
     if(level >= level_)
     {
+        MutexType::CommonLock lock(mutex_);
         std::cout << formatter_->format(logger, level, event).toStdString();
     }
 }
 
 QString StdoutLogAppender::ToYamlString()
 {
+    MutexType::CommonLock lock(mutex_);
     YAML::Node node;
     node["type"] = "StdoutLogAppender";
     if(level_ != LogLevel::UNKNOWN)
@@ -390,26 +404,33 @@ QString StdoutLogAppender::ToYamlString()
 FileLogAppender::FileLogAppender(const QString &kFileName)
     :file_name_(kFileName)
 {
+    reopen();
+}
 
+FileLogAppender::~FileLogAppender()
+{
+    if(file_.isOpen())
+        file_.close();
 }
 
 void FileLogAppender::log(QSharedPointer<Logger> logger, LogLevel::Level level, LogEvent::ptr event)
 {
     if(level >= level_)
     {
-        if(!file_.isOpen()||(file_.isOpen()&&file_.fileName()!=file_name_))
+        quint64 now = event->GetTime();
+        if(now >= (last_time_ + 3))
         {
             reopen();
+            last_time_ = now;
         }
-        if(!file_.exists()||!file_.isOpen())
-            return;
-        QTextStream file_stream(&file_);
-        file_stream << formatter_->format(logger, level, event);
+        MutexType::CommonLock lock(mutex_);
+        file_stream_ << formatter_->format(logger, level, event);
     }
 }
 
 QString FileLogAppender::ToYamlString()
 {
+    MutexType::CommonLock lock(mutex_);
     YAML::Node node;
     node["type"] = "FileLogAppender";
     node["filename"] = file_name_.toStdString();
@@ -424,6 +445,7 @@ QString FileLogAppender::ToYamlString()
 
 void FileLogAppender::reopen()
 {
+    MutexType::CommonLock lock(mutex_);
     if(file_.isOpen())
     {
         file_.close();
@@ -431,8 +453,13 @@ void FileLogAppender::reopen()
     file_.setFileName(file_name_);
     file_.open(QIODevice::Append);
     if(file_.isOpen())
-        return;
-    file_.close();
+    {
+        file_stream_.setDevice(dynamic_cast<QIODevice*>(&file_));
+    }
+    else
+    {
+        file_.close();
+    }
 }
 
 LoggerManager::LoggerManager()
@@ -445,6 +472,7 @@ LoggerManager::LoggerManager()
 
 Logger::ptr LoggerManager::GetLogger(const QString &name)
 {
+    MutexType::CommonLock lock(mutex_);
     auto it = loggers_.find(name);
     if(it != loggers_.end())
         return it.value();
@@ -461,6 +489,7 @@ void LoggerManager::Init()
 
 QString LoggerManager::ToYamlString()
 {
+    MutexType::CommonLock lock(mutex_);
     YAML::Node node;
     for(auto& i:loggers_)
     {
@@ -623,7 +652,7 @@ struct LogIniter
 {
     LogIniter()
     {
-        g_log_defines->AddListener(0xF1E2D3, [](const QSet<xianyu::LogDefine>& old_value, const QSet<xianyu::LogDefine>& new_value) {
+        g_log_defines->AddListener([](const QSet<xianyu::LogDefine>& old_value, const QSet<xianyu::LogDefine>& new_value) {
             XIANYU_LOG_INFO(XIANYU_LOG_ROOT()) << "on_logger_conf_changed";
             for(auto& i:new_value)
             {
@@ -701,6 +730,25 @@ struct LogIniter
 };
 
 static LogIniter __log_init;
+
+void LogAppender::SetFormatter(LogFormatter::ptr val)
+{
+    formatter_= val;
+    if(formatter_.get()!=nullptr)
+    {
+        has_formatter_ = true;
+    }
+    else
+    {
+        has_formatter_ = false;
+    }
+}
+
+LogFormatter::ptr LogAppender::GetFomatter()
+{
+    MutexType::CommonLock lock(mutex_);
+    return formatter_;
+}
 
 ///////
 /// 通过LogMgr的单例对象去管理所有的日志器logger，静态对象LogIniter从log.yaml中读取logger配置，并根据配置去更改LogMgr中的logger

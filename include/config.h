@@ -7,7 +7,9 @@
 #include <yaml-cpp/yaml.h>
 
 #include <functional>
+
 #include "log.h"
+#include "thread.h"
 
 #define BOOST_VARIANT_USE_RELAXED_GET_BY_DEFAULT
 
@@ -252,6 +254,7 @@ template<class T, class FromStr = LexicalCast<QString, T>, class ToStr = Lexical
 class ConfigVar : public ConfigVarBase
 {
 public:
+    using RWMutexType = RWMutex;
     using ptr = QSharedPointer<ConfigVar>;
     using on_change_cb = std::function<void(const T& old_value, const T& new_value)>;//cb ==> CallBack回调
     ConfigVar(const QString& name, const T& default_value, const QString& description)
@@ -264,6 +267,7 @@ public:
     QString ToString() override
     {
         try {
+            RWMutexType::ReadLock lock(mutex_);
             return ToStr()(val_);
         } catch(std::exception& e) {
             XIANYU_LOG_ERROR(XIANYU_LOG_ROOT()) << "ConfigVar::ToString exception" << e.what()
@@ -276,7 +280,7 @@ public:
     {
         try {
             SetValue(FromStr()(val));
-            return true;;
+            return true;
         } catch(std::exception& e) {
             XIANYU_LOG_ERROR(XIANYU_LOG_ROOT()) << " ConfigVar::FromString exception " << e.what()
                                                 << " convert: QString to " << typeid(val_).name();
@@ -284,36 +288,56 @@ public:
         return false;
     }
 
-    const T GetValue()const {return val_;}
+    const T GetValue()
+    {
+        RWMutexType::ReadLock lock(mutex_);
+        return val_;
+    }
     void SetValue(const T& v)
     {
-        if(v == val_)
         {
-            return;
-        }
-        for(auto& func : cbs_)
-        {
-            func(val_, v);
-        }
+            RWMutexType::ReadLock lock(mutex_);
+            if(v == val_)
+            {
+                return;
+            }
+            for(auto& func : cbs_)
+            {
+                func(val_, v);
+            }
+        }//大括号是为了析构读锁
+        RWMutexType::WriteLock lock(mutex_);
         val_ = v;
     }
 
     QString GetTypeName() const override { return typeid(T).name(); }
 
-    void AddListener(quint64 key, on_change_cb cb)
+    quint64 AddListener(on_change_cb cb)
     {
-        cbs_[key] = cb;
+        static quint64 s_fun_id = 0;
+        RWMutexType::WriteLock lock(mutex_);
+        s_fun_id++;
+        cbs_[s_fun_id] = cb;
+        return s_fun_id;
     }
     void DelListener(quint64 key)
     {
+        RWMutexType::WriteLock lock(mutex_);
         cbs_.erase(key);
     }
     on_change_cb GetListener(quint64 key)
     {
+        RWMutexType::ReadLock lock(mutex_);
         auto it = cbs_.find(key);
         return it == cbs_.end() ? nullptr : it.value();
     }
+    void ClearListener()
+    {
+        RWMutexType::WriteLock lock(mutex_);
+        cbs_.clear();
+    }
 private:
+    RWMutexType mutex_;
     T val_;
     //变更回调函数组,用hash值作为key,每个hash值对应一个回调
     QMap<quint64, on_change_cb> cbs_;
@@ -322,11 +346,13 @@ private:
 class Config
 {
 public:
+    using RWMutexType = RWMutex;
     using ConfigVarMap = QMap<QString, ConfigVarBase::ptr>;
 
     template<class T>
     static typename ConfigVar<T>::ptr Lookup(const QString& name)
     {
+        RWMutexType::ReadLock lock(GetMutex());
         auto it = GetDatas().find(name);
         if(it == GetDatas().end())
         {
@@ -338,6 +364,7 @@ public:
     template<class T>
     static typename ConfigVar<T>::ptr Lookup(const QString& name, const T& default_value, const QString& description = "")
     {
+        RWMutexType::WriteLock lock(GetMutex());
         auto it = GetDatas().find(name);
         if(it != GetDatas().end())
         {
@@ -370,13 +397,25 @@ public:
 
     static ConfigVarBase::ptr LookupBase(const QString& name);
 
+    static void Visit(std::function<void(ConfigVarBase::ptr)> cb);
+
 private:
+    /////////
+    /// \brief 整个程序只能有一个Config对象，但是不能把Config对象放到全局变量中，
+    /// 全局变量的初始顺序是不确定的，所以这里把对象变成静态对象，
+    /// 保证在使用Config对象的时候，Config对象已经被构造好了
+    ///
     static ConfigVarMap& GetDatas()
     {
         static ConfigVarMap datas_;
         return datas_;
     }
 
+    static RWMutexType& GetMutex()
+    {
+        static RWMutexType mutex_;
+        return mutex_;
+    }
 };
 
 

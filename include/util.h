@@ -20,6 +20,9 @@ namespace xianyu {
 quint32 GetThreadId();
 quint32 GetFiberId();
 bool FindFirstNotOf(const QString& S, const QString& T);
+
+void Backtrace(QList<QString>& bt, int size,int skip);
+QString BacktraceToString(int size, int skip, const QString& prefix);
 }
 
 #endif // UTIL_H

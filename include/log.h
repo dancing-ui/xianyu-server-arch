@@ -1,5 +1,5 @@
-#ifndef LOGGER
-#define LOGGER
+#ifndef LOGGER_H
+#define LOGGER_H
 
 #include <QObject>
 #include <QSharedPointer>
@@ -17,11 +17,12 @@
 
 #include "singleton.h"
 #include "util.h"
+#include "thread.h"
 
 #define XIANYU_LOG_LEVEL(logger, level) \
     if(logger->GetLevel() <= level) \
         xianyu::LogEventWrap(xianyu::LogEvent::ptr(new xianyu::LogEvent(logger, level, __FILE__, __LINE__, 0 \
-                            , xianyu::GetThreadId(), xianyu::GetFiberId(), time(0)))).GetContentStream()
+                            , xianyu::GetThreadId(), xianyu::GetFiberId(), time(0), xianyu::Thread::GetStaticName()))).GetContentStream()
 
 #define XIANYU_LOG_DEBUG(logger) XIANYU_LOG_LEVEL(logger, xianyu::LogLevel::DEBUG)
 #define XIANYU_LOG_INFO(logger) XIANYU_LOG_LEVEL(logger, xianyu::LogLevel::INFO)
@@ -32,7 +33,7 @@
 #define XIANYU_LOG_FMT_LEVEL(logger, level, fmt, ...) \
     if(logger->GetLevel() <= level) \
         xianyu::LogEventWrap(xianyu::LogEvent::ptr(new xianyu::LogEvent(logger, level, __FILE__, __LINE__, 0 \
-                            , xianyu::GetThreadId(), xianyu::GetFiberId(), time(0)))).GetEvent()->format(fmt, __VA_ARGS__)
+                            , xianyu::GetThreadId(), xianyu::GetFiberId(), time(0), xianyu::Thread::GetStaticName()))).GetEvent()->format(fmt, __VA_ARGS__)
 
 #define XIANYU_LOG_FMT_DEBUG(logger, fmt, ...) XIANYU_LOG_FMT_LEVEL(logger, xianyu::LogLevel::DEBUG, fmt, __VA_ARGS__)
 #define XIANYU_LOG_FMT_INFO(logger, fmt, ...) XIANYU_LOG_FMT_LEVEL(logger, xianyu::LogLevel::INFO, fmt, __VA_ARGS__)
@@ -74,7 +75,8 @@ public:
     using ptr = QSharedPointer<LogEvent>;
     explicit LogEvent(QSharedPointer<Logger> logger, LogLevel::Level level
                       , const QString& file_name, qint32 line, quint32 elapse
-                      , quint32 thread_id, quint32 fiber_id, quint64 time);
+                      , quint32 thread_id, quint32 fiber_id, quint64 time
+                      , const QString& thread_name);
 
     const QString& GetFileName()const {return file_name_;}
     qint32 GetLine()const {return line_;}
@@ -82,6 +84,7 @@ public:
     quint32 GetThreadId()const {return thread_id_;}
     quint32 GetFiberId()const {return fiber_id_;}
     quint64 GetTime()const {return time_;}
+    const QString& GetThreadName()const {return thread_name_;}
     QString& GetContent() {return content_;}
     QTextStream& GetContentStream(){return content_stream_;}
     QSharedPointer<Logger> GetLogger()const {return logger_;}
@@ -98,6 +101,7 @@ private:
     quint32 fiber_id_ = 0;           //协程id
     quint64 time_ = 0;              //时间戳
     QString content_;               //日志内容
+    QString thread_name_;
     QTextStream content_stream_;
     QSharedPointer<Logger> logger_;
     LogLevel::Level level_;
@@ -157,6 +161,8 @@ class LogAppender
     friend class Logger;
 public:
     using ptr = QSharedPointer<LogAppender>;
+    using MutexType = SpinLock;
+
     virtual ~LogAppender(){}
 
     bool has_formatter_{false};
@@ -164,25 +170,15 @@ public:
     virtual void log(QSharedPointer<Logger> logger, LogLevel::Level level, LogEvent::ptr event) = 0;
     virtual QString ToYamlString() = 0;
 
-    void SetFormatter(LogFormatter::ptr val)
-    {
-        formatter_= val;
-        if(formatter_.get()!=nullptr)
-        {
-            has_formatter_ = true;
-        }
-        else
-        {
-            has_formatter_ = false;
-        }
-    }
-    LogFormatter::ptr GetFomatter()const {return formatter_;}
+    void SetFormatter(LogFormatter::ptr val);
+    LogFormatter::ptr GetFomatter();
     LogLevel::Level GetLevel()const {return level_;}
     void SetLevel(LogLevel::Level level){level_ = level;}//设置不同级别的目的：存储不同级别的对象，比如只存ERROR级别以上的对象，只存DEBUG级别以上的对象
 
 protected:
     LogLevel::Level level_ = LogLevel::DEBUG;
     LogFormatter::ptr formatter_;
+    MutexType mutex_;
 
 signals:
 
@@ -195,6 +191,7 @@ class Logger : public QEnableSharedFromThis<Logger>
     friend class LoggerManager;
 public:
     using ptr = QSharedPointer<Logger>;
+    using MutexType = SpinLock;
     Logger(const QString& kName = "root");
 
     void log(LogLevel::Level level, LogEvent::ptr event);
@@ -212,7 +209,7 @@ public:
     void SetLevel(LogLevel::Level val) {level_ = val;}
     void SetFormatter(LogFormatter::ptr val);
     void SetFormatter(const QString& val);
-    LogFormatter::ptr GetFormatter()const;
+    LogFormatter::ptr GetFormatter();
 
     const QString& GetName()const {return name_;}
 
@@ -224,6 +221,7 @@ private:
     QList<LogAppender::ptr> appenders_;     //appender集合
     LogFormatter::ptr formatter_;
     Logger::ptr root_; //默认logger
+    MutexType mutex_;
 
 signals:
 
@@ -246,6 +244,7 @@ class FileLogAppender : public LogAppender
 public :
     using ptr = QSharedPointer<FileLogAppender>;
     explicit FileLogAppender(const QString& kFileName);
+    ~FileLogAppender();
     void log(QSharedPointer<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override;
     QString ToYamlString() override;
 
@@ -254,7 +253,9 @@ public :
     const QString& GetFileName()const {return file_name_;}
 private:
     QString file_name_;
+    QTextStream file_stream_;
     QFile file_;
+    quint64 last_time_{0};
 };
 
 
@@ -331,6 +332,21 @@ public:
     }
     void format(QTextStream& ts, QSharedPointer<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override {
         ts << event->GetThreadId();
+    }
+};
+//////////////////
+/// \brief %N -- 线程名称
+/////////////////
+class ThreadNameFormatItem : public LogFormatter::FormatItem
+{
+public:
+    ThreadNameFormatItem(const QString& str)
+        :FormatItem(str)
+    {
+
+    }
+    void format(QTextStream& ts, QSharedPointer<Logger> logger, LogLevel::Level level, LogEvent::ptr event) override {
+        ts << event->GetThreadName();
     }
 };
 //////////////////
@@ -450,6 +466,7 @@ private:
 class LoggerManager
 {
 public:
+    using MutexType = SpinLock;
     LoggerManager();
     Logger::ptr GetLogger(const QString& name);
 
@@ -460,6 +477,7 @@ public:
 private:
     QMap<QString, Logger::ptr> loggers_;
     Logger::ptr root_;
+    MutexType mutex_;
 };
 
 using LoggerMgr = xianyu::Singleton<LoggerManager>;
@@ -469,4 +487,4 @@ void TestForDefine();
 
 }
 
-#endif // LOGGER
+#endif // LOGGER_H

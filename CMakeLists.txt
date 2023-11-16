@@ -34,8 +34,6 @@ file(GLOB ${PROJECT_NAME}_HEADER "./include/*")
 #将/include路径包含到查找头文件路径
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
-message(${PROJECT_SOURCE_DIR}/include)
-
 add_executable(${PROJECT_NAME}
     ${${PROJECT_NAME}_SOURCES}
     ${${PROJECT_NAME}_HEADER}

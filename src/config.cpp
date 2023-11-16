@@ -23,10 +23,6 @@ void Config::LoadFromYaml(const YAML::Node &root)
 {
     QList<QPair<QString, YAML::Node>> all_nodes;
     ListAllMember("", root, all_nodes);
-//    for(auto& [x,y]:all_nodes)
-//    {
-//        qDebug()<<x;
-//    }
 
     for(auto& [key, val] : all_nodes)
     {
@@ -57,6 +53,16 @@ ConfigVarBase::ptr Config::LookupBase(const QString &name)
 {
     auto it = GetDatas().find(name);
     return it == GetDatas().end() ? nullptr : it.value();
+}
+
+void Config::Visit(std::function<void (ConfigVarBase::ptr)> cb)
+{
+    RWMutexType::ReadLock lock(GetMutex());
+    ConfigVarMap& m = GetDatas();
+    for(auto it = m.begin();it!=m.end();it++)
+    {
+        cb(it.value());
+    }
 }
 
 }
